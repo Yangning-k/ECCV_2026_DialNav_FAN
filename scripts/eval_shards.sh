@@ -60,13 +60,10 @@ fi
 # The challenge rules do not cap navigation turns and the score ignores the
 # agent's step count, so a longer budget only costs wall-clock time.  The
 # allowlist stays in place to catch accidental budgets.
-case "$MAX_ACTION_LEN" in
-  50|200|300|400|600) ;;
-  *)
-    echo "DIALNAV_MAX_ACTION_LEN must be 50, 200, 300, 400, or 600; got: $MAX_ACTION_LEN" >&2
-    exit 2
-    ;;
-esac
+if ! [[ "$MAX_ACTION_LEN" =~ ^[1-9][0-9]*$ ]]; then
+  echo "DIALNAV_MAX_ACTION_LEN must be a positive integer; got: $MAX_ACTION_LEN" >&2
+  exit 2
+fi
 
 case "$SPLIT" in
   val_seen) SPLIT_FLAG="--val_seen_anno_paths" ;;
@@ -76,6 +73,12 @@ case "$SPLIT" in
     echo "Unsupported split: $SPLIT (expected val_seen, val_unseen, or test)" >&2
     exit 2
     ;;
+esac
+
+RUNNER="${DIALNAV_RUNNER:-local}"
+case "$RUNNER" in
+  local|docker) ;;
+  *) echo "DIALNAV_RUNNER must be local or docker; got: $RUNNER" >&2; exit 2 ;;
 esac
 
 CONTAINERS=(
@@ -165,7 +168,6 @@ PASSTHROUGH_VARS=(
   LOCAL_ANS_CKPT
   LOCAL_ANS_WEIGHT
   LOCAL_ANS_WIDEN
-  NAV_GEMINI_Q_ENABLED
   NAV_CONFIRM_KWAY
   NAV_CONFIRM_ASK
   NAV_CONFIRM_TOPK
@@ -177,8 +179,6 @@ PASSTHROUGH_VARS=(
   NAV_RETRO_CLIP_TOPK
   NAV_RETRO_CLIP_THRESHOLD
   NAV_RETRO_CLIP_TEXT
-  NAV_RETRO_GEMINI
-  NAV_RETRO_GEMINI_K
   CLIP_STOP_ENABLED
   CLIP_STOP_APPLY_LOGITS
   CLIP_STOP_WEIGHTS
@@ -191,16 +191,6 @@ PASSTHROUGH_VARS=(
   NAV_SWEEP_MAX_REPEAT_NODES
   NAV_SWEEP_MAX_STEPS
   NAV_SWEEP_RESERVE
-  GEMINI_STOP_ENABLED
-  GEMINI_STOP_MODEL
-  GEMINI_STOP_RENDER_DIR
-  GEMINI_STOP_MAX_CANDIDATES
-  GEMINI_STOP_VIEWS
-  GEMINI_STOP_PRESCREEN_K
-  GEMINI_STOP_MAX_CALLS
-  GEMINI_STOP_CACHE
-  GEMINI_STOP_MIN_STEP
-  GEMINI_STOP_INTERVAL
   UPDATE_ANSWER_BEHIND
   ANSWER_FORMAT
   GTL_SCENE_CACHE_DIR
@@ -211,12 +201,6 @@ PASSTHROUGH_VARS=(
   TRANSFORMERS_OFFLINE
   HF_HUB_OFFLINE
   PYTORCH_CUDA_ALLOC_CONF
-  HTTP_PROXY
-  HTTPS_PROXY
-  NO_PROXY
-)
-SECRET_VARS=(
-  GEMINI_API_KEY
 )
 
 for ((index = 0; index < NUM_SHARDS; index++)); do
@@ -236,7 +220,8 @@ for ((index = 0; index < NUM_SHARDS; index++)); do
     echo "Use a new run name or set DIALNAV_OVERWRITE=1." >&2
     exit 2
   fi
-  if docker exec "$container" ps -eo args= 2>/dev/null |
+  if [[ "$RUNNER" == "docker" ]] &&
+     docker exec "$container" ps -eo args= 2>/dev/null |
       awk '$0 ~ /holistic\/main\.py/ { found = 1 }
            END { exit found ? 0 : 1 }'; then
     echo "Refusing to share $container: another holistic evaluation is running" >&2
@@ -290,8 +275,7 @@ for ((index = 0; index < NUM_SHARDS; index++)); do
   for name in "${PASSTHROUGH_VARS[@]}"; do
     if [[ ${!name+x} == x ]]; then
       value="${!name}"
-      if [[ "$name" == "GUIDE_ARRIVAL_CACHE" ||
-            "$name" == "GEMINI_STOP_CACHE" ]]; then
+      if [[ "$name" == "GUIDE_ARRIVAL_CACHE" ]]; then
         value="${value//%d/$index}"
       fi
       printf '%q ' "$name=$value" >> "$out_dir/command.sh"
@@ -325,24 +309,33 @@ for ((index = 0; index < NUM_SHARDS; index++)); do
   for name in "${PASSTHROUGH_VARS[@]}"; do
     if [[ ${!name+x} == x ]]; then
       value="${!name}"
-      if [[ "$name" == "GUIDE_ARRIVAL_CACHE" ||
-            "$name" == "GEMINI_STOP_CACHE" ]]; then
+      if [[ "$name" == "GUIDE_ARRIVAL_CACHE" ]]; then
         value="${value//%d/$index}"
       fi
       exec_env+=("$name=$value")
     fi
   done
+  log_path="$out_dir/run.log"
+  printf -v command_text '%q ' "${command[@]}"
+
+  if [[ "$RUNNER" == "local" ]]; then
+    # No container: place the shard on its GPU directly.  This is the path a
+    # third party can run, since it needs nothing but the repository and the
+    # official data.
+    nohup env "${exec_env[@]/CUDA_VISIBLE_DEVICES=0/CUDA_VISIBLE_DEVICES=$host_gpu}" \
+      sh -lc "exec $command_text > $(printf '%q' "$log_path") 2>&1" \
+      > "$out_dir/launch.log" 2>&1 < /dev/null &
+    pid="$!"
+    echo "$pid" > "$out_dir/pid"
+    PIDS+=("$pid")
+    echo "launched shard=$index gpu=$host_gpu pid=$pid out=$out_dir"
+    continue
+  fi
+
   docker_exec_args=()
   for env_entry in "${exec_env[@]}"; do
     docker_exec_args+=(--env "$env_entry")
   done
-  for name in "${SECRET_VARS[@]}"; do
-    if [[ ${!name+x} == x ]]; then
-      docker_exec_args+=(--env "$name")
-    fi
-  done
-  printf -v command_text '%q ' "${command[@]}"
-  log_path="$out_dir/run.log"
   nohup docker exec \
     "${docker_exec_args[@]}" \
     "$container" sh -lc "exec $command_text > $(printf '%q' "$log_path") 2>&1" \

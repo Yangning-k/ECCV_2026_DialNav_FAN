@@ -44,22 +44,35 @@ Also required: the Matterport3D Simulator built for Python 3.10, and PyTorch
 
 ## Data
 
-Download the official DialNav release and point `DATA_ROOT` at it. Expected
-layout:
+Download the official DialNav release and point `DATA_ROOT` at the directory
+that contains `dataset/`. Expected layout, all of it official and used as
+published:
 
 ```
-$DATA_ROOT/dataset/checkpoints/{nav_rainbow,q_rainbow,a_rainbow}   # official
-$DATA_ROOT/dataset/checkpoints/loc_rainbow.pth                     # official
-$DATA_ROOT/dataset/features/CLIP-ViT-B-16-views.tsv                # official
-$DATA_ROOT/dataset/features/clip_vit-h14_mp3d_original.hdf5        # official
-$DATA_ROOT/dataset/connectivity/                                   # official
-$DATA_ROOT/dataset/RAIN_holistic/{val_seen,val_unseen,test}.json    # official
-$DATA_ROOT/cache/ViT-B-16.pt                                       # public CLIP
+$DATA_ROOT/dataset/checkpoints/{nav_rainbow,q_rainbow,a_rainbow}
+$DATA_ROOT/dataset/checkpoints/loc_rainbow.pth
+$DATA_ROOT/dataset/features/CLIP-ViT-B-16-views.tsv
+$DATA_ROOT/dataset/features/clip_vit-h14_mp3d_original.hdf5
+$DATA_ROOT/dataset/connectivity/
+$DATA_ROOT/dataset/modules/clip_tokenizer/bpe_simple_vocab_16e6.txt.gz
+$DATA_ROOT/dataset/RAIN_holistic/{val_seen,val_unseen,test}.json
 ```
 
-No additional dataset is used and no preprocessing is applied to the official
-files. `$DATA_ROOT/cache/ViT-B-16.pt` is the public OpenAI CLIP ViT-B/16
+No additional dataset is used and no preprocessing is applied to these files.
+The evaluation shards are produced from `RAIN_holistic` at run time by
+`scripts/make_shards.py`, which `scripts/run_delivered.sh` calls for you.
+
+One public weight file is downloaded separately: the OpenAI CLIP ViT-B/16
 release, used only to encode text.
+
+```bash
+mkdir -p "$DATA_ROOT/cache"
+curl -L -o "$DATA_ROOT/cache/ViT-B-16.pt" \
+  https://openaipublic.azureedge.net/clip/models/5806e77cd80f8b59890b7e101eabd078d9fb84e6937f9e85e4ecb61988df416f/ViT-B-16.pt
+# sha256 5806e77cd80f8b59890b7e101eabd078d9fb84e6937f9e85e4ecb61988df416f
+```
+
+Override `CLIP_STOP_WEIGHTS` if you keep it elsewhere.
 
 `vocab/h14_vocab_text.npz` ships with this repository: the 98 vocabulary words
 embedded with CLIP ViT-H/14. It is a model constant carrying no episode, scene,
@@ -78,8 +91,17 @@ DATA_ROOT=/path/to/data bash scripts/run_delivered.sh val_unseen
 DATA_ROOT=/path/to/data bash scripts/run_delivered.sh test
 ```
 
-Eight shards on eight GPUs, batch size 8, seed 0, greedy decoding. The run is
+This shards the split, launches one shard per GPU, and prints the aggregated
+metrics. Eight GPUs, batch size 8, seed 0, greedy decoding. The run is
 deterministic: repeating it reproduces the metrics below exactly, to every digit.
+
+The GTL localizer writes a scene cache, so `GTL_SCENE_CACHE_DIR` must be
+writable; it defaults to `$DATA_ROOT/scene_cache`. Set `DIALNAV_PYTHON` and
+`DIALNAV_MATTERPORT_SIM_BUILD` if the interpreter and the built simulator are
+not on the default paths. Passing `DIALNAV_RUNNER=docker` places each shard in a
+pre-existing container instead of running it directly, which is how the reported
+numbers were produced; both runners execute the same command and give the same
+result.
 
 | Split | Episodes | SR (%) | DTC | Oracle SR (%) |
 |---|---|---|---|---|

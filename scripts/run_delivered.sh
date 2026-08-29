@@ -25,9 +25,15 @@ cd "$REPO" || exit 1
 # shellcheck source=../configs/delivered.env
 source configs/delivered.env
 
+SHARD_DIR="${DIALNAV_SHARD_DIR:-$REPO/output/shards}"
+python3 scripts/make_shards.py \
+  --annotation "$DATA_ROOT/dataset/RAIN_holistic/$SPLIT.json" \
+  --split "$SPLIT" --output_dir "$SHARD_DIR"
+export DIALNAV_SHARD_DIR="$SHARD_DIR"
+
 TAG="delivered_$SPLIT"
 mkdir -p "$OUT_ROOT"
-scripts/eval_shards_docker.sh "$SPLIT" "$TAG" "$OUT_ROOT"
+scripts/eval_shards.sh "$SPLIT" "$TAG" "$OUT_ROOT"
 
 runs=()
 for shard in 0 1 2 3 4 5 6 7; do runs+=("$OUT_ROOT/${TAG}_$shard"); done
