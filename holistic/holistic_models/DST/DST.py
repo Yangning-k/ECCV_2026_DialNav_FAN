@@ -42,6 +42,13 @@ def merge_args(default_args, new_args):
     
     return Namespace(**merged_dict)
 
+# The guide prefixes its referring expression with this phrase and the
+# navigator reads the words back out of the span that follows it.  The same
+# literal appears in holistic/CompliantGuide.py; the two must stay identical
+# or the description silently stops reaching the navigator.
+DESC_LEADIN = "You should see"
+
+
 class DST(Navigation):
     def __init__(self, basepath, args=None, rank=0):
         from transformers import AutoTokenizer
@@ -72,11 +79,6 @@ class DST(Navigation):
         self.last_nav_idx = None
         self.clip_stop_matcher = ClipStopMatcher()
         self.stop_texts = []
-        self.arrival_answers = []
-        self.confirm_arrival = np.array([], dtype=bool)
-        self.confirm_ask_request = np.array([], dtype=bool)
-        self.arrival_judge_targets = []
-        self.target_descriptions = []
         self.frontier_states = []
         self.retro_clip_candidates = []
         self.visited_viewpoints = []
@@ -168,11 +170,6 @@ class DST(Navigation):
         self.gmaps = self.agent._initialize_graph(obs)
         self.ended = np.array([False] * len(obs))
         self.stop_texts = [""] * len(obs)
-        self.arrival_answers = [False] * len(obs)
-        self.confirm_arrival = np.array([False] * len(obs))
-        self.confirm_ask_request = np.array([False] * len(obs))
-        self.arrival_judge_targets = [None] * len(obs)
-        self.target_descriptions = [""] * len(obs)
         self.visited_viewpoints = [[ob["viewpoint"]] for ob in obs]
         self.retro_clip_candidates = [[] for _ in obs]
         self.forced_stop = np.array([False] * len(obs))
@@ -193,11 +190,7 @@ class DST(Navigation):
                 "retro_target": None,
                 "retro_candidates": [],
                 "retro_candidate_index": 0,
-                "retro_confirm_pending": False,
-                "retro_confirmations": 0,
-                "asked_candidates": [],
                 "retro_clip_candidates": [],
-                "kway_asked": False,
             }
             for _ in obs
         ]
@@ -211,41 +204,6 @@ class DST(Navigation):
             )
         self.agent._update_scanvp_cands(obs)
 
-    def set_arrival_judge_targets(self, targets):
-        """Receive Guide's selected K-way destination for the next action."""
-        if targets is None:
-            return
-        targets = list(targets)
-        if len(self.arrival_judge_targets) != len(targets):
-            self.arrival_judge_targets = [None] * len(targets)
-        for index, target in enumerate(targets):
-            if target is not None:
-                self.arrival_judge_targets[index] = target
-
-    def set_target_descriptions(self, descriptions):
-        """Keep the Guide's spoken target description as a clean CLIP query.
-
-        The text is already part of the answer the Navigator receives; this
-        side channel only avoids re-parsing it out of the answer string.
-        """
-        if descriptions is None:
-            return
-        descriptions = list(descriptions)
-        if len(self.target_descriptions) != len(descriptions):
-            self.target_descriptions = [""] * len(descriptions)
-        for index, description in enumerate(descriptions):
-            if description:
-                self.target_descriptions[index] = str(description)
-
-    def get_confirm_candidate_sets(self):
-        """CLIP-ranked visited nodes the guide should choose between."""
-        return [
-            list(state["retro_clip_candidates"])
-            if state["retro_active"]
-            else []
-            for state in self.frontier_states
-        ]
-
     def _clip_stop_logits(self, nav_logits, obs):
         if (
             not self.clip_stop_matcher.enabled
@@ -254,9 +212,6 @@ class DST(Navigation):
             return nav_logits
         threshold = float(os.environ.get("CLIP_STOP_THRESHOLD", "0.30"))
         bias = float(os.environ.get("CLIP_STOP_BIAS", "0.80"))
-        arrival_bias = float(
-            os.environ.get("CLIP_STOP_ARRIVAL_BIAS", str(bias + 0.40))
-        )
         adjusted_logits = nav_logits.clone()
         for index, ob in enumerate(obs):
             if self.ended[index] or not self.stop_texts[index]:
@@ -267,11 +222,7 @@ class DST(Navigation):
                 self.stop_texts[index],
             )
             if score is not None and score >= threshold:
-                adjusted_logits[index, 0] += (
-                    arrival_bias
-                    if self.confirm_arrival[index]
-                    else bias
-                )
+                adjusted_logits[index, 0] += bias
         return adjusted_logits
 
     def _select_frontier(self, index, ob):
@@ -350,13 +301,6 @@ class DST(Navigation):
         max_sweep_steps = int(os.environ.get("NAV_SWEEP_MAX_STEPS", "0"))
         max_action_len = int(getattr(self.args, "max_action_len", 100))
         sweep_reserve = max(1, int(os.environ.get("NAV_SWEEP_RESERVE", "16")))
-        if os.environ.get("NAV_CONFIRM_ASK", "0") == "1":
-            # The candidate tour runs only after the sweep releases control, so
-            # the sweep must hand over early enough to travel between candidates
-            # and spend one dialog turn on each of them.
-            sweep_reserve += max(
-                0, int(os.environ.get("NAV_CONFIRM_RESERVE", "28"))
-            )
         sweep_end_step = max(0, max_action_len - sweep_reserve)
         for index, ob in enumerate(obs):
             state = self.frontier_states[index]
@@ -407,11 +351,6 @@ class DST(Navigation):
                 <= max_repeat_nodes
             )
             stop_requested = bool(ended[index]) or next_vp_ids[index] is None
-            if self.confirm_arrival[index]:
-                # Only an arrival reported in reply to an explicit confirmation
-                # request may skip the sweep; an arrival prefix produced by an
-                # ordinary dialog turn is far too noisy to end the episode.
-                stop_requested = False
             should_sweep = (
                 stop_requested
                 or state["stalled_steps"] >= no_new_steps
@@ -560,76 +499,18 @@ class DST(Navigation):
         answer_text = self.stop_texts[index]
         if not answer_text:
             return ""
-        target_text = str(ob.get("instruction", "")).strip()
-        if ":" in target_text:
-            target_text = target_text.split(":", 1)[1].strip()
-        query_mode = os.environ.get("NAV_RETRO_CLIP_TEXT", "template")
-        description = (
-            self.target_descriptions[index]
-            if index < len(self.target_descriptions)
-            else ""
-        )
-        if query_mode == "target_desc" and description:
-            return f"a photo of a {target_text}. {description}"
-        if query_mode == "desc" and description:
-            return description
-        if query_mode == "answer":
-            return answer_text
-        if query_mode == "target_answer":
-            return f"a photo of a {target_text}. {answer_text}"
-        if query_mode == "answer_desc":
-            # The guide speaks the words after a fixed lead-in, so the dialog
-            # text is the only path they travel; take that span verbatim.
-            marker = os.environ.get(
-                "NAV_DESC_MARKER", "you should see"
-            ).lower()
-            lowered = answer_text.lower()
-            position = lowered.rfind(marker) if marker else -1
-            if position >= 0:
-                spoken = answer_text[position + len(marker):]
-                spoken = spoken.strip().rstrip(".").strip()
-                if spoken:
-                    return spoken
-            return answer_text
-        if query_mode in {"vocab_bag", "vocab_target_objs", "answer_bag"}:
-            # answer_bag ignores the side channel and reads the words back out
-            # of the guide's spoken answer, so the dialog is the only path the
-            # description travels.
-            source = (
-                answer_text
-                if query_mode == "answer_bag"
-                else (description or answer_text)
-            )
-            room = self._mentioned_room(source)
-            objects = [
-                name
-                for name in self._mentioned_objects(source)
-                if name != target_text and name != room
-            ]
-            if query_mode in {"vocab_bag", "answer_bag"}:
-                parts = [
-                    part
-                    for part in ([target_text, room] + objects)
-                    if part
-                ]
-                if parts:
-                    return ", ".join(parts)
-            elif objects:
-                joined = ", ".join(objects)
-                return (
-                    f"a photo of a {target_text} in a {room} with {joined}"
-                    if room
-                    else f"a photo of a {target_text} with {joined}"
-                )
-            elif room:
-                return f"a photo of a {target_text} in a {room}"
-            return f"a photo of a {target_text}"
-        room = self._mentioned_room(answer_text)
-        return (
-            f"a photo of a {target_text} in a {room}"
-            if room
-            else f"a photo of a {target_text}. {answer_text}"
-        )
+        # The guide speaks its referring expression after a fixed lead-in, so
+        # the dialog text is the only path those words travel.  Take that span
+        # verbatim; fall back to the whole answer if the lead-in is absent.
+        marker = DESC_LEADIN.lower()
+        lowered = answer_text.lower()
+        position = lowered.rfind(marker) if marker else -1
+        if position >= 0:
+            spoken = answer_text[position + len(marker):]
+            spoken = spoken.strip().rstrip(".").strip()
+            if spoken:
+                return spoken
+        return answer_text
 
     def _select_retro_candidates(self, index, ob):
         self.retro_clip_candidates[index] = []
@@ -657,7 +538,7 @@ class DST(Navigation):
                 )
                 candidate_count = max(
                     1,
-                    int(os.environ.get("NAV_CONFIRM_TOPK", "3")),
+                    int(os.environ.get("NAV_RETRO_TOPK", "1")),
                 )
                 clip_ranked = [
                     viewpoint
@@ -703,81 +584,34 @@ class DST(Navigation):
         return route
 
     def _retro_fallback_target(self, state, current):
-        """Best already-asked candidate to fall back to once the tour ends."""
-        asked = set(state["asked_candidates"])
-        # Prefer CLIP order even when the threshold-bypass path puts the
-        # navigator's stop-score candidate at the head of the tour.
+        """Best remaining candidate once the preferred one is unreachable."""
         for viewpoint in state["retro_clip_candidates"]:
-            if viewpoint in asked:
-                return viewpoint
-        for viewpoint in state["asked_candidates"]:
             return viewpoint
         if state["retro_candidates"]:
             return state["retro_candidates"][0]
         return current
 
     def _retro_stop_action(self, next_vp_ids, ended, obs, nav_idx):
+        """Walk back to the best-scoring node the sweep saw, then stop there.
+
+        The navigator never stops where the sweep happens to end; it re-ranks
+        the nodes it has actually visited against the guide's description and
+        returns to the winner, which is why the return trip is planned over
+        the observed graph only.
+        """
         if os.environ.get("NAV_RETRO_STOP", "0") != "1":
             return next_vp_ids, ended
         min_step = int(os.environ.get("NAV_RETRO_MIN_STEP", "8"))
         reserve = max(0, int(os.environ.get("NAV_RETRO_RESERVE", "8")))
         max_action_len = int(getattr(self.args, "max_action_len", 100))
-        confirm_enabled = os.environ.get("NAV_CONFIRM_ASK", "0") == "1"
-        confirm_limit = max(
-            1,
-            int(os.environ.get("NAV_CONFIRM_TOPK", "3")),
-        )
-        kway_mode = os.environ.get("NAV_CONFIRM_KWAY", "0")
-        kway_enabled = kway_mode in {"1", "oneshot"}
-        kway_oneshot = kway_mode == "oneshot"
         for index, ob in enumerate(obs):
             state = self.frontier_states[index]
             if self.ended[index] or state["retro_done"]:
                 continue
-            judge_target = (
-                self.arrival_judge_targets[index]
-                if index < len(self.arrival_judge_targets)
-                else None
-            )
-            if kway_enabled and judge_target is not None:
-                current = ob["viewpoint"]
-                state["retro_confirm_pending"] = False
-                self.confirm_ask_request[index] = False
-                state["retro_target"] = judge_target
-                state["retro_active"] = True
-                if current == judge_target:
-                    next_vp_ids[index] = current
-                    ended[index] = True
-                    state["retro_active"] = False
-                    state["retro_done"] = True
-                    self.arrival_judge_targets[index] = None
-                    self.forced_stop[index] = True
-                    continue
-                remaining = max_action_len - nav_idx
-                route = self._retro_route(
-                    index,
-                    current,
-                    judge_target,
-                    remaining,
-                )
-                if route:
-                    next_vp_ids[index] = route[0]
-                    ended[index] = False
-                    continue
-                next_vp_ids[index] = current
-                ended[index] = True
-                state["retro_active"] = False
-                state["retro_done"] = True
-                self.arrival_judge_targets[index] = None
-                self.forced_stop[index] = True
-                continue
             if not state["retro_active"]:
-                if (
-                    self.confirm_arrival[index]
-                    and not state["sweep_done"]
-                ):
-                    continue
-                stop_requested = bool(ended[index]) or next_vp_ids[index] is None
+                stop_requested = (
+                    bool(ended[index]) or next_vp_ids[index] is None
+                )
                 near_budget = nav_idx >= max_action_len - reserve
                 if not state["sweep_done"] and (
                     nav_idx < min_step or not (stop_requested or near_budget)
@@ -788,112 +622,26 @@ class DST(Navigation):
                     ob,
                 )
                 state["retro_candidate_index"] = 0
-                state["retro_confirm_pending"] = False
-                state["retro_confirmations"] = 0
-                state["asked_candidates"] = []
                 state["retro_clip_candidates"] = list(
                     self.retro_clip_candidates[index]
                 )
                 state["retro_target"] = state["retro_candidates"][0]
                 state["retro_active"] = True
 
-            if (
-                kway_oneshot
-                and not state["kway_asked"]
-                and state["retro_clip_candidates"]
-            ):
-                # Hand the whole CLIP top-K set to the guide in a single turn so
-                # the referee costs one dialog instead of one per candidate.
-                state["kway_asked"] = True
-                state["retro_confirm_pending"] = False
-                self.arrival_answers[index] = False
-                self.confirm_arrival[index] = False
-                self.confirm_ask_request[index] = True
-                next_vp_ids[index] = ob["viewpoint"]
-                ended[index] = False
-                continue
-            if kway_oneshot and state["kway_asked"]:
-                # The referee already had its turn; a missing answer must not
-                # trigger a second ask, so fall back to the CLIP-led tour.
-                self.confirm_ask_request[index] = False
-
-            if state["retro_confirm_pending"]:
-                if self.arrival_answers[index] and not kway_enabled:
-                    current = ob["viewpoint"]
-                    next_vp_ids[index] = current
-                    ended[index] = True
-                    state["retro_active"] = False
-                    state["retro_done"] = True
-                    state["retro_confirm_pending"] = False
-                    self.confirm_ask_request[index] = False
-                    self.forced_stop[index] = True
-                    continue
-                state["retro_confirm_pending"] = False
-                self.confirm_ask_request[index] = False
-                state["retro_candidate_index"] += 1
-                if (
-                    state["retro_candidate_index"]
-                    >= len(state["retro_candidates"])
-                    or state["retro_confirmations"] >= confirm_limit
-                ):
-                    state["retro_target"] = self._retro_fallback_target(
-                        state,
-                        ob["viewpoint"],
-                    )
-                else:
-                    state["retro_target"] = state["retro_candidates"][
-                        state["retro_candidate_index"]
-                    ]
-
             target = state["retro_target"]
             current = ob["viewpoint"]
             if target is None or target == current:
-                candidate_index = state["retro_candidate_index"]
-                if (
-                    confirm_enabled
-                    and candidate_index < len(state["retro_candidates"])
-                    and state["retro_confirmations"] < confirm_limit
-                    and target == state["retro_candidates"][candidate_index]
-                ):
-                    self.arrival_answers[index] = False
-                    self.confirm_arrival[index] = False
-                    state["retro_confirm_pending"] = True
-                    state["retro_confirmations"] += 1
-                    if current not in state["asked_candidates"]:
-                        state["asked_candidates"].append(current)
-                    self.confirm_ask_request[index] = True
-                    next_vp_ids[index] = current
-                    ended[index] = False
-                    continue
                 next_vp_ids[index] = current
                 ended[index] = True
                 state["retro_active"] = False
                 state["retro_done"] = True
-                self.confirm_ask_request[index] = False
                 self.forced_stop[index] = True
                 continue
             remaining = max_action_len - nav_idx
             route = self._retro_route(index, current, target, remaining)
-            if not route and confirm_enabled:
-                # This candidate does not fit the remaining budget, but a later
-                # one may still be close enough to visit and ask about.
-                if state["retro_confirmations"] < confirm_limit:
-                    for offset in range(
-                        state["retro_candidate_index"] + 1,
-                        len(state["retro_candidates"]),
-                    ):
-                        candidate = state["retro_candidates"][offset]
-                        route = self._retro_route(
-                            index, current, candidate, remaining
-                        )
-                        if route:
-                            state["retro_candidate_index"] = offset
-                            state["retro_target"] = candidate
-                            break
             if not route:
-                # No candidate is left to visit. Stopping where we stand would
-                # end the episode on a node the guide already rejected, so walk
-                # back to the best candidate we did ask about instead.
+                # The winner is out of budget; settle for the best node that
+                # is still reachable rather than stopping mid-corridor.
                 fallback = self._retro_fallback_target(state, current)
                 route = self._retro_route(index, current, fallback, remaining)
                 state["retro_target"] = fallback if route else current
@@ -905,7 +653,6 @@ class DST(Navigation):
                 ended[index] = True
                 state["retro_active"] = False
                 state["retro_done"] = True
-                self.confirm_ask_request[index] = False
                 self.forced_stop[index] = True
         return next_vp_ids, ended
 
@@ -1048,15 +795,6 @@ class DST(Navigation):
         for i, ob in enumerate(obs):
             if i in to_ask_indices:
                 self.stop_texts[i] = str(answers[i])
-                self.arrival_answers[i] = str(answers[i]).lstrip().lower().startswith(
-                    "you have reached the target area"
-                )
-                # Remember whether this arrival report answers an explicit
-                # confirmation request; the flag is still set at this point
-                # because the retro state machine clears it on the next step.
-                self.confirm_arrival[i] = bool(
-                    self.arrival_answers[i]
-                ) and bool(self.confirm_ask_request[i])
             target_encoded = self.tokenizer.encode(ob["instruction"])
             answer_encoded = self.tokenizer.encode(answers[i])
             if append_behind: # for R2R, RxR test

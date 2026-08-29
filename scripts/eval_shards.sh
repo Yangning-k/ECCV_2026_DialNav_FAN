@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run one complete DialNav split on eight pre-pinned GPU containers.
+# Run one complete DialNav split as eight shards, one GPU each.
 #
 # Usage:
-#   eval_shards_docker.sh <split> <run_name> <output_root>
+#   eval_shards.sh <split> <run_name> <output_root>
 #
-# The container mapping is fixed to host GPUs 0..7:
-#   dialnav_gpu0, dialnav_gpu1, dialnav_gpu2, dialnav_run2,
-#   dialnav_gpu4, dialnav_gpu5, dialnav_gpu6, dialnav_run
+# DIALNAV_RUNNER selects how the shards are launched:
+#   local  (default) eight host processes pinned to GPUs 0..7
+#   docker            one pre-built container per GPU, for our own setup only
 #
-# Every run intentionally uses batch_size=8 and max_action_len=50.  The
-# containers expose one host GPU each, so CUDA_VISIBLE_DEVICES is 0 inside
-# every container.
+# Batch size is fixed at 8.  The step budget comes from DIALNAV_MAX_ACTION_LEN;
+# configs/delivered.env sets the submitted value.
 
 if [[ $# -ne 3 ]]; then
   echo "usage: $0 <split> <run_name> <output_root>" >&2
@@ -58,8 +57,7 @@ if [[ -n "$CPU_CORES_PER_SHARD" ]]; then
 fi
 
 # The challenge rules do not cap navigation turns and the score ignores the
-# agent's step count, so a longer budget only costs wall-clock time.  The
-# allowlist stays in place to catch accidental budgets.
+# agent's step count, so a longer budget only costs wall-clock time.
 if ! [[ "$MAX_ACTION_LEN" =~ ^[1-9][0-9]*$ ]]; then
   echo "DIALNAV_MAX_ACTION_LEN must be a positive integer; got: $MAX_ACTION_LEN" >&2
   exit 2
@@ -81,6 +79,7 @@ case "$RUNNER" in
   *) echo "DIALNAV_RUNNER must be local or docker; got: $RUNNER" >&2; exit 2 ;;
 esac
 
+# Used by the docker runner only; ignored when DIALNAV_RUNNER=local.
 CONTAINERS=(
   dialnav_gpu0
   dialnav_gpu1
@@ -121,16 +120,8 @@ PASSTHROUGH_VARS=(
   GUIDE_DESC_ENABLED
   GUIDE_DESCRIPTION_FILE
   GUIDE_ARRIVAL_CONFIRM
-  GUIDE_ARRIVAL_JUDGE
-  GUIDE_ARRIVAL_K
   GUIDE_ARRIVAL_TOPN
   GUIDE_ARRIVAL_MARGIN
-  GUIDE_ARRIVAL_RENDER_DIR
-  GUIDE_ARRIVAL_MODEL
-  GUIDE_ARRIVAL_VIEWS
-  GUIDE_ARRIVAL_MAX_CALLS
-  GUIDE_ARRIVAL_WORKERS
-  GUIDE_ARRIVAL_CACHE
   GUIDE_LOC_CONSISTENCY
   GUIDE_LOC_HISTORY_LIMIT
   GUIDE_LOC_MAX_JUMP
@@ -168,17 +159,13 @@ PASSTHROUGH_VARS=(
   LOCAL_ANS_CKPT
   LOCAL_ANS_WEIGHT
   LOCAL_ANS_WIDEN
-  NAV_CONFIRM_KWAY
-  NAV_CONFIRM_ASK
-  NAV_CONFIRM_TOPK
-  NAV_CONFIRM_RESERVE
   NAV_RETRO_STOP
   NAV_RETRO_MIN_STEP
   NAV_RETRO_RESERVE
   NAV_RETRO_CLIP
   NAV_RETRO_CLIP_TOPK
   NAV_RETRO_CLIP_THRESHOLD
-  NAV_RETRO_CLIP_TEXT
+  NAV_RETRO_TOPK
   CLIP_STOP_ENABLED
   CLIP_STOP_APPLY_LOGITS
   CLIP_STOP_WEIGHTS
@@ -191,12 +178,9 @@ PASSTHROUGH_VARS=(
   NAV_SWEEP_MAX_REPEAT_NODES
   NAV_SWEEP_MAX_STEPS
   NAV_SWEEP_RESERVE
-  UPDATE_ANSWER_BEHIND
-  ANSWER_FORMAT
   GTL_SCENE_CACHE_DIR
   GTL_SCENE_CACHE_MAX
   GTL_PANO_CACHE_MAX
-  GTL_NO_CACHE
   HF_HOME
   TRANSFORMERS_OFFLINE
   HF_HUB_OFFLINE
@@ -274,11 +258,7 @@ for ((index = 0; index < NUM_SHARDS; index++)); do
   > "$out_dir/command.sh"
   for name in "${PASSTHROUGH_VARS[@]}"; do
     if [[ ${!name+x} == x ]]; then
-      value="${!name}"
-      if [[ "$name" == "GUIDE_ARRIVAL_CACHE" ]]; then
-        value="${value//%d/$index}"
-      fi
-      printf '%q ' "$name=$value" >> "$out_dir/command.sh"
+      printf '%q ' "$name=${!name}" >> "$out_dir/command.sh"
     fi
   done
   printf '%q ' "${command[@]}" >> "$out_dir/command.sh"
@@ -308,11 +288,7 @@ for ((index = 0; index < NUM_SHARDS; index++)); do
   )
   for name in "${PASSTHROUGH_VARS[@]}"; do
     if [[ ${!name+x} == x ]]; then
-      value="${!name}"
-      if [[ "$name" == "GUIDE_ARRIVAL_CACHE" ]]; then
-        value="${value//%d/$index}"
-      fi
-      exec_env+=("$name=$value")
+      exec_env+=("$name=${!name}")
     fi
   done
   log_path="$out_dir/run.log"

@@ -179,7 +179,6 @@ def dialNav(navigator,
     navigator.initialize_nav(obs)
 
     ask = np.array([False] * batch_size)
-    confirm_ask = np.array([False] * batch_size)
 
 
     question_seen_path = None
@@ -201,13 +200,6 @@ def dialNav(navigator,
             ask = np.array([False] * batch_size)
         else:
             ask = navigator.wta(step, nav_probs, nav_outs)
-            navigation_model = getattr(navigator, "navigation_model", None)
-            confirm_requests = getattr(
-                navigation_model, "confirm_ask_request", None
-            )
-            if confirm_requests is not None:
-                confirm_ask = np.array(confirm_requests, dtype=bool, copy=True)
-            
         to_ask_indices = [index for index, value in enumerate(ask) if value and not ended[index]]
         need_dialog = len(to_ask_indices) > 0
         if need_dialog:
@@ -262,12 +254,6 @@ def dialNav(navigator,
                     instr_ids=[obs[i]['instr_id'] for i in range(batch_size)],
                     active_indices=to_ask_indices,
                     arrival_viewpoints=viewpoints,
-                    confirm_indices=[
-                        index
-                        for index in to_ask_indices
-                        if confirm_ask[index]
-                    ],
-                    candidate_sets=navigator.get_confirm_candidate_sets(),
                 )
             else:
                 answer_start = time.perf_counter() if profile is not None else None
@@ -283,28 +269,6 @@ def dialNav(navigator,
             arrival_candidates = getattr(
                 guide, "last_arrival_candidates", None
             )
-            arrival_judge_targets = getattr(
-                guide, "last_arrival_judge_targets", None
-            )
-            if arrival_judge_targets is not None:
-                navigator.set_arrival_judge_targets(
-                    arrival_judge_targets
-                )
-            # The delivered configuration reads the guide's words back out of
-            # the spoken answer, so this structured hand-off is dead weight
-            # there.  It stays only for the ablation modes that predate the
-            # single-channel design, and is not established otherwise: a
-            # channel that is never populated cannot be mistaken for one the
-            # navigator relies on.
-            if os.environ.get("NAV_RETRO_CLIP_TEXT", "template") in {
-                "desc",
-                "target_desc",
-            } or os.environ.get("NAV_RETRO_GEMINI", "0") == "1":
-                target_descriptions = getattr(
-                    guide, "last_target_descriptions", None
-                )
-                if target_descriptions:
-                    navigator.set_target_descriptions(target_descriptions)
             navigator.update_instruction(to_ask_indices, questions, answers, append_behind=update_answer_behind)
 
             # raise Exception("stop here")
@@ -380,7 +344,6 @@ def dialNav(navigator,
             }
             if i in to_ask_indices:
                 navigation_detail_item['ask'] = True
-                navigation_detail_item['confirm_ask'] = bool(confirm_ask[i])
                 navigation_detail_item['question'] = questions[i]
                 navigation_detail_item['localized_viewpoint'] = localized_viewpoints[i]
                 navigation_detail_item['answer'] = answers[i]

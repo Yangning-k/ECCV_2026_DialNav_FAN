@@ -46,6 +46,12 @@ def load_path_rerank_weights(answer_model, ckpt_path):
     return answer_model
 
 
+# Prefix for the referring expression the guide speaks.  The navigator parses
+# the span after this phrase (see DESC_LEADIN in holistic_models/DST/DST.py);
+# the two literals must stay identical.
+DESC_LEADIN = "You should see"
+
+
 class CompliantGuide(ModularGuide):
     def __init__(self, args, answer_model, localization_model, env_infos):
         super().__init__(args, answer_model, localization_model, env_infos)
@@ -83,8 +89,6 @@ class CompliantGuide(ModularGuide):
         )
         self.localization_history = {}
         self.last_arrival_candidates = []
-        self.last_arrival_judge_targets = []
-        self.last_target_descriptions = []
         self.answer_grounding_models = []
         self.path_rerank_model = None
 
@@ -219,18 +223,6 @@ class CompliantGuide(ModularGuide):
                 candidates.append(node)
         return candidates
 
-    def _arrival_judge_target(
-        self,
-        scan,
-        goal,
-        candidates,
-        questions,
-        instr_id,
-    ):
-        # Arrival is settled by the guide's own localizer.  The delivered
-        # system offers no separate judge, so the shortlist is never overruled.
-        return None
-
     def _at_goal(
         self,
         scan,
@@ -238,18 +230,7 @@ class CompliantGuide(ModularGuide):
         goal,
         question=None,
         instr_id=None,
-        candidates=None,
     ):
-        if candidates:
-            selected = self._arrival_judge_target(
-                scan,
-                goal,
-                [item["viewpoint"] for item in candidates],
-                [item.get("question", "") for item in candidates],
-                instr_id,
-            )
-            if selected is not None:
-                return selected == viewpoint
         if viewpoint in goal:
             return True
         if self.arrival_margin <= 0:
@@ -265,8 +246,7 @@ class CompliantGuide(ModularGuide):
             return f"You have reached the target area. {answer}".strip()
         if not description:
             return answer
-        lead = os.environ.get("GUIDE_CAPTION_LEADIN", "You should see")
-        spoken = f"{lead} {description}." if lead else description
+        spoken = f"{DESC_LEADIN} {description}."
         if at_goal:
             prefix = "You have reached the target area."
             return f"{prefix} {spoken}".strip()
@@ -447,8 +427,6 @@ class CompliantGuide(ModularGuide):
         instr_ids=None,
         active_indices=None,
         arrival_viewpoints=None,
-        confirm_indices=None,
-        candidate_sets=None,
     ):
         active_indices = (
             list(range(len(scanIds)))
@@ -558,11 +536,8 @@ class CompliantGuide(ModularGuide):
             if arrival_viewpoints is None
             else list(arrival_viewpoints)
         )
-        confirm_indices = set(confirm_indices or [])
         decorated_answers = []
         self.last_arrival_candidates = []
-        self.last_arrival_judge_targets = [None] * len(answers)
-        self.last_target_descriptions = [""] * len(answers)
         for index, (scan, answer, instr_id, viewpoint, goal) in enumerate(
             zip(scanIds, answers, instr_ids, viewpoints, goals)
         ):
@@ -579,21 +554,18 @@ class CompliantGuide(ModularGuide):
                     if self.description_enabled
                     else ""
                 )
-            self.last_target_descriptions[index] = str(description or "")
             arrival_candidates = self._localization_candidates(
                 index, viewpoint
             )
             self.last_arrival_candidates.append(arrival_candidates)
-            at_goal = False
-            if not at_goal:
-                at_goal = (
-                    any(
-                        self._at_goal(scan, hypothesis, goal)
-                        for hypothesis in arrival_candidates
-                    )
-                    if self.arrival_confirm_enabled
-                    else viewpoint in goal
+            at_goal = (
+                any(
+                    self._at_goal(scan, hypothesis, goal)
+                    for hypothesis in arrival_candidates
                 )
+                if self.arrival_confirm_enabled
+                else viewpoint in goal
+            )
             decorated_answers.append(
                 self._decorate_answer(answer, description, at_goal)
             )

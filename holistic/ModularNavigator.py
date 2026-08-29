@@ -36,19 +36,6 @@ class ModularNavigator(NavigatorAgent):
     def update_instruction(self, to_ask_indices, questions, answers, append_behind=False):
         self.navigation_model.update_instruction(to_ask_indices, questions, answers, append_behind)
 
-    def set_arrival_judge_targets(self, targets):
-        if hasattr(self.navigation_model, "set_arrival_judge_targets"):
-            self.navigation_model.set_arrival_judge_targets(targets)
-
-    def set_target_descriptions(self, descriptions):
-        if hasattr(self.navigation_model, "set_target_descriptions"):
-            self.navigation_model.set_target_descriptions(descriptions)
-
-    def get_confirm_candidate_sets(self):
-        if hasattr(self.navigation_model, "get_confirm_candidate_sets"):
-            return self.navigation_model.get_confirm_candidate_sets()
-        return None
-
     def apply_local_grounding(self, *args, **kwargs):
         return self.navigation_model.apply_local_grounding(*args, **kwargs)
 
@@ -57,23 +44,13 @@ class ModularNavigator(NavigatorAgent):
         if self.wta_model is None:
             raise ValueError("wta_model is not set")
         suppressed = getattr(self.navigation_model, "dialog_suppressed", None)
-        confirm = getattr(self.navigation_model, "confirm_ask_request", None)
         if suppressed is not None and hasattr(self.wta_model, "set_blocked"):
-            self.wta_model.set_blocked(
-                [
-                    bool(flag)
-                    and not (confirm is not None and bool(confirm[index]))
-                    for index, flag in enumerate(suppressed)
-                ]
-            )
+            self.wta_model.set_blocked([bool(flag) for flag in suppressed])
         ask = self.wta_model.wta(step, nav_probs, nav_outs)
-        if suppressed is None and confirm is None:
+        if suppressed is None:
             return ask
         return [
-            bool(confirm[index])
-            if confirm is not None and bool(confirm[index])
-            else bool(value)
-            and (suppressed is None or not bool(suppressed[index]))
+            bool(value) and not bool(suppressed[index])
             for index, value in enumerate(ask)
         ]
     
