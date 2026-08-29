@@ -1,0 +1,8 @@
+This repository builds on the official RAINbow codebase:
+
+  RAINbow - Baselines for the DialNav benchmark
+  Copyright by the RAINbow authors, released under the MIT License.
+
+It includes the released RAINbow Navigator (DST), Questioner/Answerer (LANA),
+and Localizer (GTL) modules. The original license notices in the submodule
+directories remain applicable.

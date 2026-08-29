@@ -1,0 +1,17 @@
+# Inference only; no component is trained.
+torch==2.6.0
+h5py==3.11.0
+numpy==1.23.5
+transformers==4.30.0
+networkx==2.5.1
+Shapely==1.7.1
+easydict==1.9
+jsonlines==2.0.0
+tqdm==4.62.0
+ftfy==6.1.1
+nltk==3.9.1
+torch_geometric
+
+# Only for scripts/make_h14_text.py, which regenerates assets/h14_vocab_text.npz.
+# The file ships with the repository, so this is not needed to reproduce results.
+# open_clip_torch==2.24.0

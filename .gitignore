@@ -1,0 +1,31 @@
+# Datasets, features and checkpoints are downloaded, never committed.
+data/
+assets/
+checkpoints/
+*.hdf5
+*.tsv
+*.pth
+*.pt
+
+# Run artefacts.
+output/
+logs/
+runs/
+tmp/
+*.log
+*.aux
+*.out
+
+# Python.
+__pycache__/
+*.py[cod]
+.env
+
+# Training-only data and third-party caption-eval tooling; inference needs none.
+modules/loc/GTL/way_splits/train*.json
+modules/qa/LANA/finetune_src/r2r/cap_eval/
+*.jar
+
+# Correspondence and report build artefacts.
+ORGANIZER_CLARIFICATION_EMAIL.txt
+.audit_backup_*/
